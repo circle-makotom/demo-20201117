@@ -1,7 +1,7 @@
 version: 2
 
 jobs:
-  build:
+  prepare-dependencies:
     docker:
       - image: node:current-alpine
     steps:
@@ -22,6 +22,17 @@ jobs:
           key: yarn-deps-{{ checksum "yarn.lock" }}-{{ epoch }}
       - store_artifacts:
           path: yarn.lock
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  build-production:
+    docker:
+      - image: node:current-alpine
+    steps:
+      - attach_workspace:
+          at: .
       - run:
           name: Production build
           command: |
@@ -29,3 +40,66 @@ jobs:
             yarn build
       - store_artifacts:
           path: dist/server.js
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  build-docker-image:
+    machine:
+      image: default
+      docker_layer_caching: true
+    environment:
+      DOCKER_IMAGE_NAME: makotom/azcci-server
+    steps:
+      - attach_workspace:
+          at: .
+      - run:
+          name: Setup DOCKER_IMAGE_REF envvar
+          command: |
+            export __BUILD_VERSION="$(cat version.txt)"
+            echo "export DOCKER_IMAGE_REF=$DOCKER_REGISTRY/$DOCKER_IMAGE_NAME:$__BUILD_VERSION" >> $BASH_ENV
+      - run:
+          name: docker login
+          command: |
+            docker login -u $DOCKER_LOGIN --password-stdin $DOCKER_REGISTRY << EOD
+            $DOCKER_PASSWORD
+            EOD
+      - run:
+          name: docker build
+          command: docker build -t $DOCKER_IMAGE_REF .
+      - run:
+          name: docker push
+          command: docker push $DOCKER_IMAGE_REF
+
+  test:
+    docker:
+      - image: node:current-alpine
+    parallelism: 2
+    steps:
+      - attach_workspace:
+          at: .
+      - run:
+          name: Run tests
+          command: |
+            circleci tests glob '**/*.test.ts' | circleci tests split --split-by timings | xargs yarn test:ci
+      - store_artifacts:
+          path: test-results
+      - store_test_results:
+          path: test-results
+
+workflows:
+  version: 2
+  build-test-deploy:
+    jobs:
+      - prepare-dependencies
+      - build-production:
+          requires:
+            - prepare-dependencies
+      - build-docker-image:
+          context: acr
+          requires:
+            - build-production
+      - test:
+          requires:
+            - prepare-dependencies
